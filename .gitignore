@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+*.o
+*.d
+.DS_Store
+Thumbs.db
