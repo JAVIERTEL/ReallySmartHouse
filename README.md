@@ -10,7 +10,6 @@ ReallySmartHouse/
 ├── docs/
 ├── gateway/
 ├── pet-tracker/
-├── aquarium/
 ├── plant-node/
 ├── air-node/
 └── mailbox/
@@ -32,14 +31,14 @@ Each node folder is an independent PlatformIO project and must contain its own `
 - Visual Studio Code
 - PlatformIO IDE extension
 - Git
-- Python 3 (only needed if the repository is generated from a setup script)
+
 
 ## How to Use This Repository
 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR-USER/ReallySmartHouse.git
+git clone https://github.com/JAVIERTEL/ReallySmartHouse.git
 cd ReallySmartHouse
 ```
 
@@ -78,7 +77,7 @@ Use one shared GitHub repository for the whole team, but work in separate branch
 
 Recommended branches:
 
-- `main` → stable code only
+- `master` → stable code only
 - `develop` → integration branch
 - `feature/<node-name>` → personal feature branches
 
@@ -102,7 +101,7 @@ Then open a Pull Request on GitHub.
 
 ## Rules for the Team
 
-- Do not push directly to `main`
+- Do not push directly to `master`
 - Open Pull Requests for changes
 - Keep each node isolated in its own folder
 - Only modify shared protocol files after team agreement
