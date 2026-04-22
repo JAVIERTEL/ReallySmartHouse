@@ -19,7 +19,7 @@
 #define BLYNK_AUTH_TOKEN "qFFhJWNX9VNj6ZFnX4sSWXDzqG70BmqG"
 #include <BlynkSimpleEsp32.h>
 
-SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+SET_LOOP_TASK_STACK_SIZE(32 * 1024);
 
 // ====================== HARDWARE CONFIG ======================
 HardwareSerial loraSerial(1);
