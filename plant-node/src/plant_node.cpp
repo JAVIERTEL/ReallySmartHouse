@@ -54,13 +54,13 @@ String buildDataMessage(const SensorData& data) {
 
 }
 
-static bool isSyncMessage(const String& msg) {
-    String expected = String(GATEWAY_ID) + "|SYNC|" + String(BROADCAST_ID) + "|CYCLE_START";
+bool isSyncMessage(const String& msg) {
+    String expected = String(GATEWAY_ID) + "|SYNC|" + String(BROADCAST_ID) + "|cycle_start";
     return msg == expected;
 }
 
 static bool isAckForMe(const String& msg) {
-    String expected = String(GATEWAY_ID) + "|ACK|" + String(NODE_ID) + "|OK";
+    String expected = String(GATEWAY_ID) + "|ACK|" + String(NODE_ID) + "|ok";
     return msg == expected;
 }
 

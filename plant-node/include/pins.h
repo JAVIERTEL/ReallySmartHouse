@@ -1,8 +1,8 @@
 #pragma once
 
 // LoRa UART
-#define LORA_RX 19
-#define LORA_TX 18
+#define LORA_RX 18
+#define LORA_TX 19
 #define LORA_RST 23
 
 // Temperature & Humidity, Water sensor
