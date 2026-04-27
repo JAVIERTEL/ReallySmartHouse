@@ -61,7 +61,7 @@ const char* auth     = BLYNK_AUTH_TOKEN;
 
 // Cycle timing (ms)
 const unsigned long CYCLE_PERIOD   = 600000UL; // 10 minutes
-const unsigned long SLOT_DURATION = 4000UL;   // 4s per slot
+const unsigned long SLOT_DURATION = 3500UL;   // 4s per slot
 const unsigned long ACK_TIMEOUT   = 1200UL;   // attesa DATA dal nodo
 const unsigned long REPLY_TIMEOUT = 1500UL;   // attesa RESP a REQ
 // ====================== STATE VARIABLES ======================
@@ -424,28 +424,44 @@ void sendAck(const String& to) {
 }
 
 // Wait for a DATA packet from a specific node in its slot
-void runNodeSlot(const String& expectedSender,void (*handler)(const String&),const String& expectedReceiver, int apriTutto) {
+void runNodeSlot(const String& expectedSender, void (*handler)(const String&), const String& expectedReceiver, int apriTutto) {
   unsigned long slotStart = millis();
   while (millis() - slotStart < SLOT_DURATION) {
     String raw = loraReceive(ACK_TIMEOUT);
     if (raw.length() == 0) continue;
     Packet p = parsePacket(raw);
     if (!p.valid) continue;
+
+    // DEBUG: stampa esattamente cosa ha parsato
+    Serial.printf("[SLOT DEBUG] sender='%s'(%d) type='%s'(%d) receiver='%s'(%d)\n",
+                  p.sender.c_str(), p.sender.length(),
+                  p.type.c_str(), p.type.length(),
+                  p.receiver.c_str(), p.receiver.length());
+    Serial.printf("[SLOT DEBUG] expected sender='%s'(%d) receiver='%s'(%d)\n",
+                  expectedSender.c_str(), expectedSender.length(),
+                  expectedReceiver.c_str(), expectedReceiver.length());
+
+    // Stampa in hex per vedere caratteri invisibili
+    Serial.print("[SLOT HEX] sender: ");
+    for (size_t i = 0; i < p.sender.length(); i++) Serial.printf("%02X ", (uint8_t)p.sender[i]);
+    Serial.println();
+
     if (p.sender == expectedSender && p.type == "DATA" && p.receiver == expectedReceiver) {
+      Serial.println("[SLOT] MATCH! Sending ACK...");
       handler(p.payload);
       sendAck(p.sender);
-
       if (apriTutto == 1) {
-      loraSend(String(NODE_ID_GW) + "|CMD|" + p.sender + "|light=on");
+        loraSend(String(NODE_ID_GW) + "|CMD|" + p.sender + "|light=on");
       }
-
       return;
+    } else {
+      Serial.println("[SLOT] NO MATCH - skipping");
     }
   }
 }
 
 void mailboxListening(){
-String raw = loraReceive(100); // short timeout
+String raw = loraReceive(1000); // short timeout
   if (raw.length() == 0) return;
 
   Packet p = parsePacket(raw);
@@ -605,9 +621,9 @@ void loop() {
 
   // --- BLE: scansione periodica del collare ---
   //if (!inCycle && now - lastScanTime >= BLE_SCAN_INTERVAL) {
-   // lastScanTime = now;
-   // scanPetCollar();
-   // evaluatePetZone();
+    //lastScanTime = now;
+    //scanPetCollar();
+    //evaluatePetZone();
   //}
 
   // --- BLE: richiesta utente di richiamo ---
