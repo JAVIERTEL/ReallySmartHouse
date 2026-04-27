@@ -1,28 +1,18 @@
-/*
- * ReallySmartHouse — plant-node
- * Owner   : Simone Panella (s253125)
- * Function: Plant Monitoring Node - light, temperature, humidity, soil moisture
- */
 #include <Arduino.h>
-#include <SPI.h>
-#include <LoRa.h>
-#include "lora_protocol.h"
+#include "sensors.h"
+#include "radio.h"
+#include "plant_node.h"
 
 void setup() {
     Serial.begin(115200);
     Serial.println("=== plant-node booting... ===");
 
-    if (!LoRa.begin(LORA_FREQUENCY)) {
-        Serial.println("[ERROR] LoRa init failed!");
-        while (true) {}
-    }
-
-    LoRa.setSpreadingFactor(LORA_SF);
-    LoRa.setSignalBandwidth(LORA_BANDWIDTH);
-    LoRa.setTxPower(LORA_TX_POWER);
-    Serial.println("[OK] LoRa ready");
+    initSensors();
+    initPlantNode();
+    initLoRa();
 }
 
 void loop() {
-    delay(1000);
+    checkLoRa();
+    updatePlantNode();
 }
