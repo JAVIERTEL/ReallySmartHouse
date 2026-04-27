@@ -3,18 +3,26 @@
  * ESP32 (WROOM-32) + RN2483 LoRa P2P
  *
  * Logic:
- *   1. ESP32 wakes up via ext0 interrupt on GPIO33 (button simulates PIR motion sensor)
+ *   1. ESP32 wakes up via ext0 (button press)
  *   2. Init RN2483 via UART
- *   3. Read battery level (ADC GPIO34) to decide msg_type
- *   4. Send 2-byte LoRa packet to gateway
- *   5. Wait brief RX window in case gateway sends ACK or downlink command
- *   6. Go back to deep sleep indefinitely
+ *   3. Read battery level (ADC GPIO34) as percentage (0-100)
+ *   4. Send 4-byte LoRa packet to gateway
+ *   5. Wait for ACK — if no ACK, retry up to 3 times with 90s delay
+ *   6. Go back to deep sleep until next button press
  *
  * Power supply: Solar panel -> TP4056 charger -> LiPo 3.7V -> ESP32
  *
- * Payload (2 bytes, hex):
- *   Byte 0: node_id  = 0x04
- *   Byte 1: msg_type = 0x01 (motion alert) | 0x02 (battery low)
+ * Payload sent (hex):
+ *   Byte 0:    0x03              — node ID (mailbox)
+ *   Bytes 1-4: "DATA" (ASCII)   — 0x44415441
+ *   Byte 5:    0x00              — reserved (TBD with gateway)
+ *   Bytes 6+:  "mails=1;battery=XX;" (ASCII) — XX = battery percentage (0-100)
+ *
+ * ACK received (4 bytes, hex):
+ *   Byte 0: 0x00        — gateway ID
+ *   Byte 1: 0xAC        — ACK type
+ *   Byte 2: 0x03        — addressed to mailbox node
+ *   Byte 3: 0x01        — ok
  *
  * WIRING:
  *   RN2483 TX  -> ESP32 GPIO19
@@ -23,7 +31,7 @@
  *   RN2483 3V3 -> 3V3
  *   RN2483 GND -> GND
  *
- *   Button     -> GPIO33 (other leg to GND, internal pullup enabled)
+ *   Button     -> GPIO33 (other leg to 3V3, internal pullup enabled)
  *   Bat sense  -> GPIO34 (resistor divider R1=100k, R2=100k from LiPo+)
  *
  * BATTERY RESISTOR DIVIDER:
@@ -55,22 +63,28 @@
 #define LORA_SYNC       "12"          // Sync word (must match gateway)
 
 // ── Node config ───────────────────────────────────────────────────────────────
-#define NODE_ID         0x04          // Mailbox node ID
-#define MSG_MOTION      0x01          // Motion detected alert
-#define MSG_BAT_LOW     0x02          // Battery low alert
-#define BAT_LOW_THRESH  819           // ADC ~ 1.5V = LiPo at ~20% (3.3V ref, 12-bit: 1.5/3.3*4095)
-#define RX_WINDOW_MS    2000          // Time to wait for gateway ACK (ms)
+#define NODE_ID         0x03          // Mailbox node ID
+#define MSG_RESERVED    0x00          // Reserved byte (TBD with gateway)
+#define MAX_RETRIES     2             // 1 initial attempt + 1 retry
+#define RETRY_DELAY_MS  10000         // 10 seconds between attempts
+#define ACK_WINDOW_MS   5000          // Time to wait for gateway ACK (ms)
+
+// ── ADC battery config ────────────────────────────────────────────────────────
+// LiPo: 3.0V (0%) to 4.2V (100%) — after /2 divider: 1.5V to 2.1V
+// 12-bit ADC, 3.3V ref: 1.5V -> ADC 1861, 2.1V -> ADC 2606
+#define BAT_ADC_MIN     1861          // ADC value at 0% battery
+#define BAT_ADC_MAX     2606          // ADC value at 100% battery
 
 // ── Global objects ────────────────────────────────────────────────────────────
 HardwareSerial loraSerial(1);
 
 // ── Function declarations ─────────────────────────────────────────────────────
-void     lora_autobaud();
-bool     lora_init();
-bool     lora_send(uint8_t node_id, uint8_t msg_type);
-void     lora_wait_ack();
-uint8_t  read_msg_type();
-String   bytes_to_hex(uint8_t* buf, uint8_t len);
+void    lora_autobaud();
+bool    lora_init();
+bool    lora_send(uint8_t battery_pct);
+bool    lora_wait_ack();
+uint8_t read_battery_pct();
+String  bytes_to_hex(uint8_t* buf, uint8_t len);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SETUP — runs once on every wake-up
@@ -79,12 +93,6 @@ void setup() {
   Serial.begin(57600);
   Serial.println("\n[Mailbox] Woke up from deep sleep");
 
-  // Pull down GPIO33 so it stays LOW when button is not pressed
-rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);
-rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);
-esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW);
-
-  // Log wake-up cause
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
   if (cause == ESP_SLEEP_WAKEUP_EXT0) {
     Serial.println("[Mailbox] Wake cause: button press (motion event)");
@@ -103,35 +111,56 @@ esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW);
   digitalWrite(RST_LORA, HIGH);
   delay(1000);
 
-  // Init LoRa module — if it fails, skip TX and go straight to sleep
+  // Init LoRa module
   if (!lora_init()) {
     Serial.println("[Mailbox] ERROR: LoRa init failed, going back to sleep");
     goto deep_sleep;
   }
 
   {
-    // Decide message type based on battery level
-    uint8_t msg_type = read_msg_type();
-    Serial.print("[Mailbox] Sending msg_type: 0x0");
-    Serial.println(msg_type, HEX);
+    // Read battery percentage — included in every packet
+    uint8_t bat_pct = read_battery_pct();
+    Serial.print("[Mailbox] Battery: ");
+    Serial.print(bat_pct);
+    Serial.println("%");
 
-    // Send LoRa packet and optionally wait for ACK
-    if (lora_send(NODE_ID, msg_type)) {
-      Serial.println("[Mailbox] Packet sent successfully");
-      lora_wait_ack();
+    // Try to send up to MAX_RETRIES times
+    bool ack_received = false;
+    for (int attempt = 1; attempt <= MAX_RETRIES && !ack_received; attempt++) {
+      Serial.print("[Mailbox] TX attempt ");
+      Serial.print(attempt);
+      Serial.print(" of ");
+      Serial.println(MAX_RETRIES);
+
+      if (lora_send(bat_pct)) {
+        Serial.println("[Mailbox] Packet sent — waiting for ACK...");
+        ack_received = lora_wait_ack();
+      } else {
+        Serial.println("[Mailbox] ERROR: TX failed");
+      }
+
+      if (!ack_received && attempt < MAX_RETRIES) {
+        Serial.println("[Mailbox] No ACK — retrying in 10 seconds...");
+        delay(RETRY_DELAY_MS);
+      }
+    }
+
+    if (ack_received) {
+      Serial.println("[Mailbox] ACK confirmed — going to sleep");
     } else {
-      Serial.println("[Mailbox] ERROR: Failed to send packet");
+      Serial.println("[Mailbox] No ACK after 3 attempts — giving up, going to sleep");
     }
   }
 
 deep_sleep:
-  Serial.println("[Mailbox] Going to deep sleep — waiting for next motion event");
+  Serial.println("[Mailbox] Entering deep sleep — waiting for next motion event");
   Serial.flush();
 
-  // Configure GPIO33 as ext0 wake-up source (wake on HIGH = button press)
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, HIGH);
+  // Arm ext0 wake-up on GPIO33 (LOW = button press, pullup keeps it HIGH at rest)
+  rtc_gpio_pullup_en((gpio_num_t)BUTTON_PIN);
+  rtc_gpio_pulldown_dis((gpio_num_t)BUTTON_PIN);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW);
 
-  // Enter deep sleep indefinitely until next button press
   esp_deep_sleep_start();
 }
 
@@ -141,23 +170,20 @@ deep_sleep:
 void loop() {}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// read_msg_type
-// Reads battery ADC and returns MSG_BAT_LOW if below threshold, MSG_MOTION otherwise
+// read_battery_pct
+// Reads ADC on GPIO34 and returns battery level as percentage (0-100)
 // ─────────────────────────────────────────────────────────────────────────────
-uint8_t read_msg_type() {
+uint8_t read_battery_pct() {
   int adc = analogRead(BAT_PIN);
   Serial.print("[Mailbox] Battery ADC raw: ");
   Serial.println(adc);
-  if (adc < BAT_LOW_THRESH) {
-    Serial.println("[Mailbox] Battery LOW — sending battery alert");
-    return MSG_BAT_LOW;
-  }
-  return MSG_MOTION;
+  adc = constrain(adc, BAT_ADC_MIN, BAT_ADC_MAX);
+  return (uint8_t) map(adc, BAT_ADC_MIN, BAT_ADC_MAX, 0, 100);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // lora_autobaud
-// Sends autobaud sequence to RN2483 until it responds
+// Sends autobaud sequence until RN2483 responds
 // ─────────────────────────────────────────────────────────────────────────────
 void lora_autobaud() {
   String response = "";
@@ -175,21 +201,17 @@ void lora_autobaud() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // lora_init
-// Configures RN2483 for LoRa P2P transmission
-// Returns true if configuration succeeds
+// Configures RN2483 for LoRa P2P mode
 // ─────────────────────────────────────────────────────────────────────────────
 bool lora_init() {
   lora_autobaud();
 
-  // Flush any leftover response after autobaud
-  loraSerial.readStringUntil('\n');
+  loraSerial.readStringUntil('\n');  // flush leftover
 
-  // Pause LoRaWAN MAC layer to use raw LoRa P2P mode
   loraSerial.println("mac pause");
   String r = loraSerial.readStringUntil('\n');
   Serial.println("[LoRa] mac pause: " + r);
 
-  // Apply all radio settings
   loraSerial.println("radio set mod lora");        loraSerial.readStringUntil('\n');
   loraSerial.println("radio set freq " LORA_FREQ); loraSerial.readStringUntil('\n');
   loraSerial.println("radio set pwr "  LORA_PWR);  loraSerial.readStringUntil('\n');
@@ -210,19 +232,35 @@ bool lora_init() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // lora_send
-// Builds 2-byte payload and transmits it via RN2483 "radio tx" command
-// Returns true if RN2483 confirms with "radio_tx_ok"
+// Builds payload and transmits via RN2483
+// Payload: 03 | "DATA" | 00 | "mails=1;battery=XX;"
+// Returns true if radio_tx_ok received
 // ─────────────────────────────────────────────────────────────────────────────
-bool lora_send(uint8_t node_id, uint8_t msg_type) {
-  uint8_t payload[2] = { node_id, msg_type };
-  String hex = bytes_to_hex(payload, 2);
+bool lora_send(uint8_t battery_pct) {
+  // Build data string: "mails=1;battery=XX;"
+  String data = "mails=1;battery=" + String(battery_pct) + ";";
+
+  // Build full payload as hex string
+  // Fixed header: 03 | DATA(44415441) | 00
+  String hex = "03";
+  hex += "44415441";  // "DATA" in ASCII hex
+  hex += "00";        // reserved byte
+
+  // Append data string as ASCII hex
+  for (int i = 0; i < data.length(); i++) {
+    if ((uint8_t)data[i] < 0x10) hex += "0";
+    hex += String((uint8_t)data[i], HEX);
+  }
+  hex.toUpperCase();
 
   Serial.print("[LoRa] Sending payload (hex): ");
   Serial.println(hex);
+  Serial.print("[LoRa] Data string: ");
+  Serial.println(data);
 
   loraSerial.println("radio tx " + hex);
 
-  // First response: "ok" (command accepted)
+  // First response: "ok" = command accepted
   String response = loraSerial.readStringUntil('\n');
   response.trim();
   Serial.print("[LoRa] TX accepted: ");
@@ -232,12 +270,11 @@ bool lora_send(uint8_t node_id, uint8_t msg_type) {
     return false;
   }
 
-  // Keep reading until we get radio_tx_ok or timeout
+  // Loop until radio_tx_ok or 8s timeout (SF12 airtime ~2.5s)
   loraSerial.setTimeout(8000);
-  String txResult = "";
   unsigned long start = millis();
   while (millis() - start < 8000) {
-    txResult = loraSerial.readStringUntil('\n');
+    String txResult = loraSerial.readStringUntil('\n');
     txResult.trim();
     if (txResult.length() > 0) {
       Serial.print("[LoRa] TX result: ");
@@ -254,35 +291,53 @@ bool lora_send(uint8_t node_id, uint8_t msg_type) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // lora_wait_ack
-// Opens a brief RX window to receive optional ACK or downlink from gateway
+// Opens RX window and checks for valid ACK from gateway
+// Expected ACK (hex): 00AC0301
+// Returns true if valid ACK received
 // ─────────────────────────────────────────────────────────────────────────────
-void lora_wait_ack() {
-  Serial.println("[LoRa] Opening RX window for ACK...");
+bool lora_wait_ack() {
   loraSerial.println("radio rx 0");
   String r = loraSerial.readStringUntil('\n');
+  r.trim();
 
-  if (r.indexOf("ok") == 0) {
-    loraSerial.setTimeout(RX_WINDOW_MS);
-    String msg = loraSerial.readStringUntil('\n');
-    loraSerial.setTimeout(2000);
-
-    if (msg.indexOf("radio_rx") == 0) {
-      Serial.print("[LoRa] ACK/downlink received: ");
-      Serial.println(msg);
-    } else {
-      // No ACK within window — stop RX and continue to sleep
-      Serial.println("[LoRa] No ACK received, sending rxstop");
-      loraSerial.println("radio rxstop");
-      loraSerial.readStringUntil('\n');
-    }
-  } else {
+  if (r.indexOf("ok") != 0) {
     Serial.println("[LoRa] Could not open RX window");
+    return false;
   }
+
+  // Wait for incoming packet
+  loraSerial.setTimeout(ACK_WINDOW_MS);
+  String msg = loraSerial.readStringUntil('\n');
+  loraSerial.setTimeout(2000);
+  msg.trim();
+
+  if (msg.indexOf("radio_rx") == 0) {
+    // Extract hex payload from "radio_rx  <hex>"
+    String received = msg.substring(msg.lastIndexOf(" ") + 1);
+    received.toUpperCase();
+    Serial.print("[LoRa] Received: ");
+    Serial.println(received);
+
+    // Valid ACK: 00 | AC | 03 | 01
+    if (received == "00AC0301") {
+      Serial.println("[LoRa] Valid ACK received");
+      return true;
+    } else {
+      Serial.println("[LoRa] Unexpected packet — not a valid ACK");
+      return false;
+    }
+  }
+
+  // No packet in window — stop RX
+  Serial.println("[LoRa] No packet in ACK window");
+  loraSerial.println("radio rxstop");
+  loraSerial.readStringUntil('\n');
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // bytes_to_hex
-// Converts byte array to uppercase hex string (e.g. {0x04, 0x01} -> "0401")
+// Converts byte array to uppercase hex string (e.g. {0x03, 0x01} -> "0301")
 // ─────────────────────────────────────────────────────────────────────────────
 String bytes_to_hex(uint8_t* buf, uint8_t len) {
   String result = "";
