@@ -31,7 +31,8 @@ HardwareSerial loraSerial(1);
 
 // ====================== BLE CONFIG ===========================
 // Nome del collare che faremo advertising lato pet node
-#define PET_COLLAR_NAME "PetCollar"
+#define PET_TRACKER_UUID "12345678-1234-1234-1234-123456789abc" 
+#define PET_TRACKER_NAME "PetTracker-01"
 
 // UUID del servizio e caratteristica per i comandi (devono combaciare col collare)
 #define PET_SERVICE_UUID        "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -48,8 +49,8 @@ const unsigned long BLE_SCAN_DURATION = 2;       // durata scansione in secondi
 const unsigned long ALERT_COOLDOWN    = 30000UL; // non rispammare notifiche
 
 // ====================== NETWORK CONFIG =======================
-const char* ssid     = "iPhone di Giacomo";
-const char* password = "labarca123";
+const char* ssid     = "iPhone";
+const char* password = "123456781";
 const char* auth     = BLYNK_AUTH_TOKEN;
 
 // ====================== PROTOCOL CONFIG ======================
@@ -61,7 +62,7 @@ const char* auth     = BLYNK_AUTH_TOKEN;
 
 // Cycle timing (ms)
 const unsigned long CYCLE_PERIOD   = 600000UL; // 10 minutes
-const unsigned long SLOT_DURATION = 4000UL;   // 4s per slot
+const unsigned long SLOT_DURATION = 3500UL;   // 4s per slot
 const unsigned long ACK_TIMEOUT   = 1200UL;   // attesa DATA dal nodo
 const unsigned long REPLY_TIMEOUT = 1500UL;   // attesa RESP a REQ
 // ====================== STATE VARIABLES ======================
@@ -83,15 +84,7 @@ BLEScan* bleScan = nullptr;
 BLEClient* bleClient = nullptr;
 BLERemoteCharacteristic* petCmdChar = nullptr;
 
-bool petConnected = false;
-int  lastRssi = 0;
-bool lastRssiValid = false;
 unsigned long lastScanTime = 0;
-unsigned long lastWarningAlert = 0;
-unsigned long lastAlarmAlert = 0;
-
-enum PetZone { ZONE_SAFE, ZONE_WARNING, ZONE_ALARM, ZONE_UNKNOWN };
-PetZone currentZone = ZONE_UNKNOWN;
 
 volatile bool userRecallReq = false;  // utente preme "richiama cane" da Blynk
 
@@ -273,17 +266,51 @@ void handleMailData(const String& payload) {
 
 // ====================== BLE FUNCTIONS ========================
 
+// Tracker state
+BLEAddress* trackerAddr = nullptr;
+bool trackerFound = false;
+bool trackerConnected = false;
+unsigned long lastRSSIRead = 0;
+
+float rssiToDistance(int rssi) {
+  return pow(10.0, (-69.0 - rssi) / 20.0);
+}
+
+class ClientCallbacks : public BLEClientCallbacks {
+  void onConnect(BLEClient* c) override {
+    trackerConnected = true;
+    Serial.println("[BLE] Connected to tracker!");
+  }
+  void onDisconnect(BLEClient* c) override {
+    trackerConnected = false;
+    trackerFound = false;
+  }
+};
+
+
 // Callback di scansione: cerca il collare e salva l'RSSI
 class PetScanCallback : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) override {
-    if (dev.haveName() && dev.getName() == PET_COLLAR_NAME) {
-      lastRssi = dev.getRSSI();
-      lastRssiValid = true;
-      Serial.printf("[BLE] Pet collar found, RSSI=%d dBm\n", lastRssi);
+    if (dev.haveName() && dev.getName() == PET_TRACKER_NAME) {
+
+      if (trackerAddr != nullptr) {
+        delete trackerAddr;   // <-- THIS WAS MISSING
+      }
+
+      trackerAddr = new BLEAddress(dev.getAddress());
+      trackerFound = true;
       bleScan->stop();
     }
   }
 };
+
+bool connectToTracker() {
+  if (!trackerAddr) return false;
+  bleClient = BLEDevice::createClient();
+  bleClient->setClientCallbacks(new ClientCallbacks());
+  return bleClient->connect(*trackerAddr);
+}
+
 
 void initBLE() {
   Serial.println("Initing BLE");
@@ -305,7 +332,7 @@ bool connectAndSendCommand(const String& cmd) {
   BLEAddress* targetAddr = nullptr;
   for (int i = 0; i < results.getCount(); i++) {       // ← freccia
     BLEAdvertisedDevice d = results.getDevice(i);      // ← freccia
-    if (d.haveName() && d.getName() == PET_COLLAR_NAME) {
+    if (d.haveName() && d.getName() == PET_TRACKER_NAME) {
       targetAddr = new BLEAddress(d.getAddress());
       break;
     }
@@ -351,57 +378,6 @@ bool connectAndSendCommand(const String& cmd) {
   return true;
 }
 
-// Scansione periodica RSSI
-void scanPetCollar() {
-  lastRssiValid = false;
-  bleScan->start(BLE_SCAN_DURATION, false);
-  bleScan->clearResults();
-}
-
-// Valuta la zona in base all'RSSI e scatena gli alert
-void evaluatePetZone() {
-  PetZone newZone;
-
-  if (!lastRssiValid) {
-    newZone = ZONE_UNKNOWN;
-  } else if (lastRssi >= RSSI_WARNING_THRESHOLD) {
-    newZone = ZONE_SAFE;
-  } else if (lastRssi >= RSSI_ALARM_THRESHOLD) {
-    newZone = ZONE_WARNING;
-  } else {
-    newZone = ZONE_ALARM;
-  }
-
-  // Aggiorna Blynk con RSSI e zona
-  if (lastRssiValid) {
-    Blynk.virtualWrite(V30, lastRssi);
-  }
-  Blynk.virtualWrite(V31, (int)newZone);
-
-  unsigned long now = millis();
-
-  // Zona WARNING: notifica Blynk, l'utente decide se richiamare
-  if (newZone == ZONE_WARNING && (now - lastWarningAlert > ALERT_COOLDOWN)) {
-    lastWarningAlert = now;
-    Serial.println("[PET] WARNING zone");
-    Blynk.logEvent("pet_warning", "Il cane si sta allontanando. Richiamalo?");
-  }
-
-  // Zona ALARM: notifica + suono automatico
-  if (newZone == ZONE_ALARM && (now - lastAlarmAlert > ALERT_COOLDOWN)) {
-    lastAlarmAlert = now;
-    Serial.println("[PET] ALARM zone - auto sound");
-    Blynk.logEvent("pet_alarm", "Cane fuori area! Suono attivato.");
-    connectAndSendCommand("sound=on");
-  }
-
-  // Log cambio zona
-  if (newZone != currentZone) {
-    Serial.printf("[PET] Zone: %d -> %d (RSSI=%d)\n",currentZone, newZone, lastRssi);
-    currentZone = newZone;
-  }
-}
-
 // Gestione richiesta utente di richiamare il cane (dal bottone Blynk)
 void handlePetRecall() {
   if (!userRecallReq) return;
@@ -424,28 +400,44 @@ void sendAck(const String& to) {
 }
 
 // Wait for a DATA packet from a specific node in its slot
-void runNodeSlot(const String& expectedSender,void (*handler)(const String&),const String& expectedReceiver, int apriTutto) {
+void runNodeSlot(const String& expectedSender, void (*handler)(const String&), const String& expectedReceiver, int apriTutto) {
   unsigned long slotStart = millis();
   while (millis() - slotStart < SLOT_DURATION) {
     String raw = loraReceive(ACK_TIMEOUT);
     if (raw.length() == 0) continue;
     Packet p = parsePacket(raw);
     if (!p.valid) continue;
+
+    // DEBUG: stampa esattamente cosa ha parsato
+    Serial.printf("[SLOT DEBUG] sender='%s'(%d) type='%s'(%d) receiver='%s'(%d)\n",
+                  p.sender.c_str(), p.sender.length(),
+                  p.type.c_str(), p.type.length(),
+                  p.receiver.c_str(), p.receiver.length());
+    Serial.printf("[SLOT DEBUG] expected sender='%s'(%d) receiver='%s'(%d)\n",
+                  expectedSender.c_str(), expectedSender.length(),
+                  expectedReceiver.c_str(), expectedReceiver.length());
+
+    // Stampa in hex per vedere caratteri invisibili
+    Serial.print("[SLOT HEX] sender: ");
+    for (size_t i = 0; i < p.sender.length(); i++) Serial.printf("%02X ", (uint8_t)p.sender[i]);
+    Serial.println();
+
     if (p.sender == expectedSender && p.type == "DATA" && p.receiver == expectedReceiver) {
+      Serial.println("[SLOT] MATCH! Sending ACK...");
       handler(p.payload);
       sendAck(p.sender);
-
       if (apriTutto == 1) {
-      loraSend(String(NODE_ID_GW) + "|CMD|" + p.sender + "|light=on");
+        loraSend(String(NODE_ID_GW) + "|CMD|" + p.sender + "|light=on");
       }
-
       return;
+    } else {
+      Serial.println("[SLOT] NO MATCH - skipping");
     }
   }
 }
 
 void mailboxListening(){
-String raw = loraReceive(100); // short timeout
+String raw = loraReceive(1000); // short timeout
   if (raw.length() == 0) return;
 
   Packet p = parsePacket(raw);
@@ -574,7 +566,7 @@ void setup() {
   delay(500);
 
   initLoRa();
-  //initBLE();
+  initBLE();
   led_blink(3);
 
   Serial.print("Connecting WiFi");
@@ -601,17 +593,32 @@ void loop() {
 
   unsigned long now = millis();
 
-  bool inCycle = (now - lastCycleStart < 10000); // ~2 slots + margin
+  bool inCycle = (now - lastCycleStart < 8000); // ~2 slots + margin
 
   // --- BLE: scansione periodica del collare ---
-  //if (!inCycle && now - lastScanTime >= BLE_SCAN_INTERVAL) {
-   // lastScanTime = now;
-   // scanPetCollar();
-   // evaluatePetZone();
-  //}
+  if (!inCycle) {
+    // Scan for tracker every 5 seconds if not found
+    if (!trackerConnected && now - lastScanTime >= 5000) {
+      lastScanTime = now;
+      bleScan->start(1, false);
+      bleScan->clearResults();
+    }
 
-  // --- BLE: richiesta utente di richiamo ---
-  //handlePetRecall();
+    // Controlled connect
+    static unsigned long lastConnectAttempt = 0;
+    if (trackerFound && !trackerConnected && now - lastConnectAttempt > 5000) {
+      lastConnectAttempt = now;
+      connectToTracker();
+    }
+
+    // Read RSSI every 3 seconds when connected
+    if (trackerConnected && now - lastRSSIRead > 3000) {
+      int rssi = bleClient->getRssi();
+      float dist = rssiToDistance(rssi);
+      Serial.printf("[GATEWAY] Dog RSSI: %d dBm | ~%.1f m\n", rssi, dist);
+      lastRSSIRead = now;
+    }
+  }
   
   if (now - lastCycleStart >= CYCLE_PERIOD) {
     lastCycleStart = now;
@@ -634,4 +641,3 @@ void loop() {
   // Mailbox
   mailboxListening();
 }
-
