@@ -14,10 +14,7 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 
-#define BLYNK_TEMPLATE_ID "TMPL5ZzQfERwH"
-#define BLYNK_TEMPLATE_NAME "Quickstart TemplateCopy"
-#define BLYNK_AUTH_TOKEN "qFFhJWNX9VNj6ZFnX4sSWXDzqG70BmqG"
-#include <BlynkSimpleEsp32.h>
+#include <PubSubClient.h>
 
 SET_LOOP_TASK_STACK_SIZE(32 * 1024);
 
@@ -51,7 +48,24 @@ const unsigned long ALERT_COOLDOWN    = 30000UL; // non rispammare notifiche
 // ====================== NETWORK CONFIG =======================
 const char* ssid     = "iPhone";
 const char* password = "123456781";
-const char* auth     = BLYNK_AUTH_TOKEN;
+
+// HiveMQ Cloud
+const char* MQTT_HOST = "14cae6d240b2426398a24b5f85cda552.s1.eu.hivemq.cloud";
+const int   MQTT_PORT = 8883;
+const char* MQTT_USER = "group7";
+const char* MQTT_PASS = "Groupgroup7";
+
+WiFiClientSecure espClient;
+PubSubClient mqtt(espClient);
+
+// MQTT Topics
+#define TOPIC_PLANT_DATA     "home/plant/data"
+#define TOPIC_AIR_DATA       "home/air/data"
+#define TOPIC_MAIL_DATA      "home/mail/data"
+#define TOPIC_PET_STATUS     "home/pet/status"
+#define TOPIC_CMD_FAN        "home/cmd/fan"
+#define TOPIC_CMD_LIGHT      "home/cmd/light"
+#define TOPIC_CMD_PET_RECALL "home/cmd/pet_recall"
 
 // ====================== PROTOCOL CONFIG ======================
 #define NODE_ID_GW      "00"
@@ -86,7 +100,9 @@ BLERemoteCharacteristic* petCmdChar = nullptr;
 
 unsigned long lastScanTime = 0;
 
-volatile bool userRecallReq = false;  // utente preme "richiama cane" da Blynk
+volatile bool userRecallReq = false;
+volatile bool fanCmdPending = false;
+volatile bool lightCmdPending = false;
 
 struct Packet {
   String sender;
@@ -243,25 +259,25 @@ float getField(const String& payload, const String& key, float defVal = 0) {
 void handlePlantData(const String& payload) {
   plant.temp = getField(payload, "temp");
   plant.hum  = getField(payload, "hum");
-  plant.soil = (int)getField(payload, "soil");
+  plant.soil = (int)getField(payload, "water");
   plant.valid = true;
-  Blynk.virtualWrite(V0, plant.temp);
-  Blynk.virtualWrite(V1, plant.hum);
-  Blynk.virtualWrite(V2, plant.soil);
+  mqtt.publish(TOPIC_PLANT_DATA, payload.c_str());
+  Serial.print("[MQTT PUB] plant: "); Serial.println(payload);
 }
 
 void handleAirData(const String& payload) {
   air.temp = getField(payload, "temp");
   air.hum  = getField(payload, "hum");
   air.valid = true;
-  Blynk.virtualWrite(V3, air.temp);
-  Blynk.virtualWrite(V4, air.hum);
+  mqtt.publish(TOPIC_AIR_DATA, payload.c_str());
+  Serial.print("[MQTT PUB] air: "); Serial.println(payload);
 }
 
 void handleMailData(const String& payload) {
   mail.mails = (int)getField(payload, "mails");
   mail.valid = true;
-  Blynk.virtualWrite(V5, mail.mails);
+  mqtt.publish(TOPIC_MAIL_DATA, payload.c_str());
+  Serial.print("[MQTT PUB] mail: "); Serial.println(payload);
 }
 
 // ====================== BLE FUNCTIONS ========================
@@ -378,16 +394,12 @@ bool connectAndSendCommand(const String& cmd) {
   return true;
 }
 
-// Gestione richiesta utente di richiamare il cane (dal bottone Blynk)
+// Gestione richiesta utente di richiamare il cane 
 void handlePetRecall() {
   if (!userRecallReq) return;
   userRecallReq = false;
   Serial.println("[PET] User requested recall");
-  if (connectAndSendCommand("sound=on")) {
-    Blynk.logEvent("pet_recall", "Richiamo inviato al collare");
-  } else {
-    Blynk.logEvent("pet_recall_fail", "Impossibile contattare il collare");
-  }
+  connectAndSendCommand("sound=on");
 }
 
 // ====================== CYCLE PHASES =========================
@@ -449,31 +461,45 @@ String raw = loraReceive(1000); // short timeout
   }
 }
 
-// ====================== BLYNK HANDLERS =======================
-
-
-// Bottone "Richiama cane" (si attiva in zona WARNING)
-BLYNK_WRITE(V32) { if (param.asInt()) userRecallReq = true; }
-
-// Opzionale: permetti di regolare soglie da Blynk
-BLYNK_WRITE(V33) { RSSI_WARNING_THRESHOLD = param.asInt(); }
-BLYNK_WRITE(V34) { RSSI_ALARM_THRESHOLD   = param.asInt(); }
-
+// ====================== MQTT CALLBACK ========================
 static int fan = 0;
-BLYNK_WRITE(V20) { // fan control to air node
-  int value = param.asInt();
+static int light = 0;
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
   
-  if (value != fan) {  // se il valore cambia
-    fan = value;       // aggiorna fan (1→1, 0→0)
+  Serial.printf("[MQTT] %s -> %s\n", topic, msg.c_str());
+  
+  String t = String(topic);
+  if (t == TOPIC_CMD_FAN) {
+    fan = msg.toInt();
+    fanCmdPending = true;
+  }
+  else if (t == TOPIC_CMD_LIGHT) {
+    light = msg.toInt();
+    lightCmdPending = true;
+  }
+  else if (t == TOPIC_CMD_PET_RECALL) {
+    userRecallReq = true;
   }
 }
 
-static int light = 0;
-BLYNK_WRITE(V21) { // fan control to air node
-  int value = param.asInt();
-  
-  if (value != light) {  
-    light = value; 
+void mqttConnect() {
+  int attempts = 0;
+  while (!mqtt.connected() && attempts < 3) {
+    attempts++;
+    Serial.printf("[MQTT] Connecting (attempt %d)...\n", attempts);
+    String clientId = "gateway-" + String(random(0xffff), HEX);
+    if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
+      Serial.println("[MQTT] Connected!");
+      mqtt.subscribe(TOPIC_CMD_FAN);
+      mqtt.subscribe(TOPIC_CMD_LIGHT);
+      mqtt.subscribe(TOPIC_CMD_PET_RECALL);
+      return;
+    }
+    Serial.printf("[MQTT] Failed (rc=%d)\n", mqtt.state());
+    delay(2000);
   }
 }
 
@@ -482,10 +508,13 @@ String str;
 // ====================== LoRa INIT ============================
 void initLoRa() {
   
-  digitalWrite(RST, LOW);
-  delay(400);
   digitalWrite(RST, HIGH);
-  delay(1000);
+  delay(100);
+  digitalWrite(RST, LOW);
+  delay(500);
+  digitalWrite(RST, HIGH);
+
+  delay(2000);
 
   loraSerial.begin(57600, SERIAL_8N1, RXD2, TXD2);
   loraSerial.setTimeout(1000);
@@ -579,8 +608,11 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi OK");
-    Blynk.config(auth);
-    Blynk.connect();
+    espClient.setInsecure();  // TLS senza verifica certificato
+    mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setCallback(mqttCallback);
+    mqtt.setBufferSize(512);
+    mqttConnect();
   } else {
     Serial.println("WiFi FAILED - continuing offline");
   }
@@ -589,7 +621,11 @@ void setup() {
 }
 
 void loop() {
-  Blynk.run();
+  if (mqtt.connected()) {
+    mqtt.loop();
+  } else if (WiFi.status() == WL_CONNECTED) {
+    mqttConnect();
+  }
 
   unsigned long now = millis();
 
@@ -616,6 +652,15 @@ void loop() {
       int rssi = bleClient->getRssi();
       float dist = rssiToDistance(rssi);
       Serial.printf("[GATEWAY] Dog RSSI: %d dBm | ~%.1f m\n", rssi, dist);
+      
+      // Pubblica su MQTT
+      int zone = 0;  // safe
+      if (rssi < RSSI_ALARM_THRESHOLD) zone = 2;       // alarm
+      else if (rssi < RSSI_WARNING_THRESHOLD) zone = 1; // warning
+      
+      String petMsg = "distance=" + String(dist, 1) + ";zone=" + String(zone);
+      mqtt.publish(TOPIC_PET_STATUS, petMsg.c_str());
+      
       lastRSSIRead = now;
     }
   }
