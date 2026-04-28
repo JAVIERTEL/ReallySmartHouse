@@ -15,6 +15,7 @@
 #include <BLEAdvertisedDevice.h>
 
 #include <PubSubClient.h>
+#include <WiFiClientSecure.h>
 
 SET_LOOP_TASK_STACK_SIZE(32 * 1024);
 
