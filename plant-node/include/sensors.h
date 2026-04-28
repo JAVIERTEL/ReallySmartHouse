@@ -3,8 +3,8 @@
 struct SensorData {
     float temperature;
     float humidity;
-    int water;
-    int light;
+    int   light;
+    int   water;
 };
 
 void initSensors();

@@ -1,5 +1,5 @@
 /*
- * ReallySmartHouse � gateway
+ * ReallySmartHouse   gateway
  * Owner   : Giacomo Visintin (s253622)
  * Function: Central Gateway - collects data from all LoRa nodes and forwards to cloud via WiFi
  */
