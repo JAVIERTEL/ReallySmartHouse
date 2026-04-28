@@ -8,11 +8,7 @@
 #include <HardwareSerial.h>
 #include <WiFi.h>
 
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEClient.h>
-#include <BLEScan.h>
-#include <BLEAdvertisedDevice.h>
+#include <NimBLEDevice.h>
 
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
@@ -47,8 +43,8 @@ const unsigned long BLE_SCAN_DURATION = 2;       // durata scansione in secondi
 const unsigned long ALERT_COOLDOWN    = 30000UL; // non rispammare notifiche
 
 // ====================== NETWORK CONFIG =======================
-const char* ssid     = "iPhone";
-const char* password = "123456781";
+const char* ssid     = "iPhone di Giacomo";
+const char* password = "labarca123";
 
 // HiveMQ Cloud
 const char* MQTT_HOST = "14cae6d240b2426398a24b5f85cda552.s1.eu.hivemq.cloud";
@@ -95,9 +91,9 @@ MailData  mail  = {0, false};
 volatile bool plantLight = false;
 
 // ====================== BLE STATE ============================
-BLEScan* bleScan = nullptr;
-BLEClient* bleClient = nullptr;
-BLERemoteCharacteristic* petCmdChar = nullptr;
+NimBLEScan* bleScan = nullptr;
+NimBLEClient* bleClient = nullptr;
+NimBLERemoteCharacteristic* petCmdChar = nullptr;
 
 unsigned long lastScanTime = 0;
 
@@ -284,7 +280,7 @@ void handleMailData(const String& payload) {
 // ====================== BLE FUNCTIONS ========================
 
 // Tracker state
-BLEAddress* trackerAddr = nullptr;
+NimBLEAddress* trackerAddr = nullptr;
 bool trackerFound = false;
 bool trackerConnected = false;
 unsigned long lastRSSIRead = 0;
@@ -293,12 +289,12 @@ float rssiToDistance(int rssi) {
   return pow(10.0, (-69.0 - rssi) / 20.0);
 }
 
-class ClientCallbacks : public BLEClientCallbacks {
-  void onConnect(BLEClient* c) override {
+class ClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient* c) override {
     trackerConnected = true;
     Serial.println("[BLE] Connected to tracker!");
   }
-  void onDisconnect(BLEClient* c) override {
+  void onDisconnect(NimBLEClient* c) override {
     trackerConnected = false;
     trackerFound = false;
   }
@@ -306,15 +302,11 @@ class ClientCallbacks : public BLEClientCallbacks {
 
 
 // Callback di scansione: cerca il collare e salva l'RSSI
-class PetScanCallback : public BLEAdvertisedDeviceCallbacks {
-  void onResult(BLEAdvertisedDevice dev) override {
-    if (dev.haveName() && dev.getName() == PET_TRACKER_NAME) {
-
-      if (trackerAddr != nullptr) {
-        delete trackerAddr;   // <-- THIS WAS MISSING
-      }
-
-      trackerAddr = new BLEAddress(dev.getAddress());
+class PetScanCallback : public NimBLEAdvertisedDeviceCallbacks {
+  void onResult(NimBLEAdvertisedDevice* dev) override {
+    if (dev->haveName() && dev->getName() == PET_TRACKER_NAME) {
+      if (trackerAddr != nullptr) delete trackerAddr;
+      trackerAddr = new NimBLEAddress(dev->getAddress());
       trackerFound = true;
       bleScan->stop();
     }
@@ -323,7 +315,7 @@ class PetScanCallback : public BLEAdvertisedDeviceCallbacks {
 
 bool connectToTracker() {
   if (!trackerAddr) return false;
-  bleClient = BLEDevice::createClient();
+  bleClient = NimBLEDevice::createClient();
   bleClient->setClientCallbacks(new ClientCallbacks());
   return bleClient->connect(*trackerAddr);
 }
@@ -331,8 +323,8 @@ bool connectToTracker() {
 
 void initBLE() {
   Serial.println("Initing BLE");
-  BLEDevice::init("SmartHomeGW");
-  bleScan = BLEDevice::getScan();
+  NimBLEDevice::init("SmartHomeGW");
+  bleScan = NimBLEDevice::getScan();
   bleScan->setAdvertisedDeviceCallbacks(new PetScanCallback());
   bleScan->setActiveScan(true);
   bleScan->setInterval(100);
@@ -345,10 +337,11 @@ bool connectAndSendCommand(const String& cmd) {
   Serial.printf("[BLE] Connecting to send: %s\n", cmd.c_str());
 
   // Trova l'indirizzo via scan veloce
-  BLEScanResults results = bleScan->start(2, false);   // ← puntatore
-  BLEAddress* targetAddr = nullptr;
+  bleScan->start(2, false);
+  NimBLEScanResults results = bleScan->getResults();
+  NimBLEAddress* targetAddr = nullptr;
   for (int i = 0; i < results.getCount(); i++) {       // ← freccia
-    BLEAdvertisedDevice d = results.getDevice(i);      // ← freccia
+    NimBLEAdvertisedDevice d = results.getDevice(i);      // ← freccia
     if (d.haveName() && d.getName() == PET_TRACKER_NAME) {
       targetAddr = new BLEAddress(d.getAddress());
       break;
@@ -361,14 +354,14 @@ bool connectAndSendCommand(const String& cmd) {
     return false;
   }
 
-  bleClient = BLEDevice::createClient();
+  bleClient = NimBLEDevice::createClient();
   if (!bleClient->connect(*targetAddr)) {
     Serial.println("[BLE] Connect failed");
     delete targetAddr;
     return false;
   }
 
-  BLERemoteService* svc = bleClient->getService(PET_SERVICE_UUID);
+  NimBLERemoteService* svc = bleClient->getService(PET_SERVICE_UUID);
   if (!svc) {
     Serial.println("[BLE] Service not found");
     bleClient->disconnect();
@@ -490,8 +483,10 @@ void mqttConnect() {
   int attempts = 0;
   while (!mqtt.connected() && attempts < 3) {
     attempts++;
-    Serial.printf("[MQTT] Connecting (attempt %d)...\n", attempts);
+    Serial.printf("[MQTT] Attempt %d to %s:%d\n", attempts, MQTT_HOST, MQTT_PORT);
+    
     String clientId = "gateway-" + String(random(0xffff), HEX);
+    
     if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
       Serial.println("[MQTT] Connected!");
       mqtt.subscribe(TOPIC_CMD_FAN);
@@ -499,8 +494,15 @@ void mqttConnect() {
       mqtt.subscribe(TOPIC_CMD_PET_RECALL);
       return;
     }
-    Serial.printf("[MQTT] Failed (rc=%d)\n", mqtt.state());
-    delay(2000);
+    
+    int state = mqtt.state();
+    Serial.printf("[MQTT] Failed, state=%d\n", state);
+    // -4 = timeout
+    // -2 = connect failed  
+    // -1 = disconnected
+    //  5 = not authorized
+    
+    delay(3000);
   }
 }
 
@@ -510,9 +512,9 @@ String str;
 void initLoRa() {
   
   digitalWrite(RST, HIGH);
-  delay(100);
+  delay(200);
   digitalWrite(RST, LOW);
-  delay(500);
+  delay(700);
   digitalWrite(RST, HIGH);
 
   delay(2000);
@@ -595,11 +597,13 @@ void setup() {
   Serial.begin(57600);
   delay(500);
 
+  Serial.println("Starting the gateway...");
+  delay(1500);
   initLoRa();
-  initBLE();
-  led_blink(3);
+  // NON inizializzare BLE qui
 
   Serial.print("Connecting WiFi");
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8,8,8,8));
   WiFi.begin(ssid, password);
   unsigned long t = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) {
@@ -609,16 +613,20 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi OK");
-    espClient.setInsecure();  // TLS senza verifica certificato
+    Serial.println(WiFi.localIP());
+
+    espClient.setInsecure();
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     mqtt.setCallback(mqttCallback);
     mqtt.setBufferSize(512);
-    mqttConnect();
-  } else {
-    Serial.println("WiFi FAILED - continuing offline");
+    mqttConnect();  // Connetti MQTT PRIMA del BLE
   }
 
-  lastCycleStart = millis() - CYCLE_PERIOD; // trigger first cycle immediately
+  // ORA inizializza BLE (dopo che TLS handshake è completato)
+  initBLE();
+  led_blink(3);
+
+  lastCycleStart = millis() - CYCLE_PERIOD;
 }
 
 void loop() {
