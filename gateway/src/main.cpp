@@ -432,8 +432,16 @@ void runNodeSlot(const String& expectedSender, void (*handler)(const String&), c
       Serial.println("[SLOT] MATCH! Sending ACK...");
       handler(p.payload);
       sendAck(p.sender);
-      if (apriTutto == 1) {
-        loraSend(String(NODE_ID_GW) + "|CMD|" + p.sender + "|light=on");
+      // Comandi on-demand (fuori dal ciclo)
+      if (fanCmdPending) {
+        fanCmdPending = false;
+        String cmd ="fan=on";
+        loraSend(String(NODE_ID_GW) + "|CMD|" + NODE_ID_AIR + "|" + cmd);
+      }
+      if (lightCmdPending) {
+        lightCmdPending = false;
+        String cmd = "light=on";
+        loraSend(String(NODE_ID_GW) + "|CMD|" + NODE_ID_PLANT + "|" + cmd);
       }
       return;
     } else {
@@ -673,6 +681,8 @@ void loop() {
       lastRSSIRead = now;
     }
   }
+
+  delay(15000);
   
   if (now - lastCycleStart >= CYCLE_PERIOD) {
     lastCycleStart = now;
