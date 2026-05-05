@@ -9,7 +9,7 @@
 #define DHT_PIN     4
 
 // ── LED ───────────────────────────────────
-#define LED_PIN     2
+#define LED_PIN 26
 
 // ── Sensors ───────────────────────────────────────────────────
 #define LDR_PIN     35   // light sensor (ADC, input-only pin)

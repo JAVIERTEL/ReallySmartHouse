@@ -28,48 +28,85 @@ static String hexToStr(const String& h) {
 // ── Init ──────────────────────────────────────────────────────
 
 void initLoRa() {
-    pinMode(LORA_RST, OUTPUT);
-    digitalWrite(LORA_RST, LOW);
-    delay(400);
+  pinMode(LORA_RST, OUTPUT);
+
+  LoRaSerial.begin(57600, SERIAL_8N1, LORA_RX, LORA_TX);
+  LoRaSerial.setTimeout(2000);
+
+  bool moduleReady = false;
+
+  for (int attempt = 0; attempt < 5; attempt++) {
+    Serial.printf("[LoRa] Init attempt %d...\n", attempt + 1);
+
+    // Reset hardware
     digitalWrite(LORA_RST, HIGH);
-    delay(1000);
+    delay(100);
+    digitalWrite(LORA_RST, LOW);
+    delay(500);
+    digitalWrite(LORA_RST, HIGH);
+    delay(2000);
 
-    LoRaSerial.begin(57600, SERIAL_8N1, LORA_RX, LORA_TX);
-    LoRaSerial.setTimeout(1000);
-    delay(1000);
+    // Svuota buffer
+    while (LoRaSerial.available()) {
+      LoRaSerial.read();
+    }
+    delay(100);
 
-    Serial.println("[LoRa] Initialising...");
+    // Leggi messaggio di boot, se presente
+    String boot = LoRaSerial.readStringUntil('\n');
+    boot.trim();
+    if (boot.length() > 0) {
+      Serial.print("[BOOT] ");
+      Serial.println(boot);
+    }
 
-    // Boot message
-    String str = LoRaSerial.readStringUntil('\n');
-    Serial.println(str);
+    // Prova sys get ver
+    while (LoRaSerial.available()) {
+      LoRaSerial.read();
+    }
 
     LoRaSerial.println("sys get ver");
-    str = LoRaSerial.readStringUntil('\n');
-    Serial.print("[VER] "); Serial.println(str);
+    String ver = LoRaSerial.readStringUntil('\n');
+    ver.trim();
 
-    LoRaSerial.println("mac pause");
-    str = LoRaSerial.readStringUntil('\n');
-    Serial.println(str);
+    Serial.print("[VER] ");
+    Serial.println(ver);
 
-    // Radio parameters (must match gateway)
-    LoRaSerial.println("radio set mod lora");    LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set freq 869100000"); LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set pwr 14");      LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set sf sf7");      LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set afcbw 41.7");  LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set rxbw 20.8");   LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set prlen 8");     LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set crc on");      LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set iqi off");     LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set cr 4/5");      LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set wdt 60000");   LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set sync 12");     LoRaSerial.readStringUntil('\n');
-    LoRaSerial.println("radio set bw 125");      LoRaSerial.readStringUntil('\n');
+    if (ver.startsWith("RN2483")) {
+      moduleReady = true;
+      break;
+    }
 
-    Serial.println("[LoRa] Ready");
+    Serial.println("[LoRa] No response, retrying...");
+  }
+
+  if (!moduleReady) {
+    Serial.println("[LoRa] FAILED after 5 attempts!");
+    return;
+  }
+
+  // Modulo pronto, configura
+  LoRaSerial.setTimeout(1000);
+
+  LoRaSerial.println("mac pause");
+  Serial.println(LoRaSerial.readStringUntil('\n'));
+
+  LoRaSerial.println("radio set mod lora");       LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set freq 869100000"); LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set pwr 14");         LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set sf sf7");         LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set afcbw 41.7");     LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set rxbw 20.8");      LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set prlen 8");        LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set crc on");         LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set iqi off");        LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set cr 4/5");         LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set wdt 60000");      LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set sync 12");        LoRaSerial.readStringUntil('\n');
+  LoRaSerial.println("radio set bw 125");         LoRaSerial.readStringUntil('\n');
+
+  Serial.println("[LoRa] Ready");
 }
-
 // ── Send ──────────────────────────────────────────────────────
 
 bool loraSend(const String& packet) {

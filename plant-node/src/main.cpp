@@ -134,6 +134,9 @@ void setup() {
     if (isCmdForMe(cmdMsg)) {
         String payload = extractCmdPayload(cmdMsg);
         handleCmd(payload);
+
+        Serial.println("[LED] Test delay before sleep");
+        delay(10000);
     } else {
         Serial.println("[PLANT] No CMD received (normal)");
     }
