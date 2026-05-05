@@ -76,6 +76,11 @@ static void handleCmd(const String& payload) {
 static void goToSleep() {
     Serial.printf("[SLEEP] Sleeping for %d seconds\n", (int)(SLEEP_US / 1000000));
     Serial.flush();
+
+
+    gpio_hold_en((gpio_num_t)LED_PIN);
+    gpio_deep_sleep_hold_en();
+
     esp_sleep_enable_timer_wakeup(SLEEP_US);
     esp_deep_sleep_start();
 }
