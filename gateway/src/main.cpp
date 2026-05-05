@@ -72,7 +72,8 @@ PubSubClient mqtt(espClient);
 #define BROADCAST       "FF"
 
 // Cycle timing (ms)
-const unsigned long CYCLE_PERIOD   = 600000UL; // 10 minutes
+//const unsigned long CYCLE_PERIOD   = 600000UL; // 10 minutes
+const unsigned long CYCLE_PERIOD   = 60500;
 const unsigned long SLOT_DURATION = 3500UL;   // 4s per slot
 const unsigned long ACK_TIMEOUT   = 1200UL;   // attesa DATA dal nodo
 const unsigned long REPLY_TIMEOUT = 1500UL;   // attesa RESP a REQ
@@ -87,6 +88,9 @@ struct MailData  { int mails; bool valid; };
 PlantData plant = {0, 0, 0, false};
 AirData   air   = {0, 0, false};
 MailData  mail  = {0, false};
+
+static int fan = 0;
+static int light = 0;
 
 volatile bool plantLight = false;
 
@@ -285,8 +289,28 @@ bool trackerFound = false;
 bool trackerConnected = false;
 unsigned long lastRSSIRead = 0;
 
+// Distance filter config
+#define RSSI_SAMPLES     10
+#define SEND_INTERVAL_MS 30000   // send min every 30s
+#define SAMPLE_INTERVAL_MS 3000  // take a sample every 3s
+
+float         distBuffer[RSSI_SAMPLES];
+int           distCount      = 0;
+unsigned long lastSampleTime = 0;
+unsigned long lastSendTime   = 0;
+
 float rssiToDistance(int rssi) {
   return pow(10.0, (-69.0 - rssi) / 20.0);
+}
+
+// Get minimum distance from buffer
+float getMinDistance() {
+  if (distCount == 0) return -1;
+  float minDist = distBuffer[0];
+  for (int i = 1; i < distCount; i++) {
+    if (distBuffer[i] < minDist) minDist = distBuffer[i];
+  }
+  return minDist;
 }
 
 class ClientCallbacks : public NimBLEClientCallbacks {
@@ -433,14 +457,22 @@ void runNodeSlot(const String& expectedSender, void (*handler)(const String&), c
       handler(p.payload);
       sendAck(p.sender);
       // Comandi on-demand (fuori dal ciclo)
-      if (fanCmdPending) {
+      if (fanCmdPending && p.sender == NODE_ID_AIR) {
         fanCmdPending = false;
-        String cmd ="fan=on";
-        loraSend(String(NODE_ID_GW) + "|CMD|" + NODE_ID_AIR + "|" + cmd);
+        if (fan == 0){
+          String cmd ="fan=off";
+          delay(100);
+          loraSend(String(NODE_ID_GW) + "|CMD|" + NODE_ID_AIR + "|" + cmd);
+        } else {
+          String cmd ="fan=on";
+          delay(100);
+          loraSend(String(NODE_ID_GW) + "|CMD|" + NODE_ID_AIR + "|" + cmd);
+        }
       }
-      if (lightCmdPending) {
+      if (lightCmdPending && p.sender == NODE_ID_PLANT) {
         lightCmdPending = false;
         String cmd = "light=on";
+        delay(100);
         loraSend(String(NODE_ID_GW) + "|CMD|" + NODE_ID_PLANT + "|" + cmd);
       }
       return;
@@ -464,8 +496,6 @@ String raw = loraReceive(1000); // short timeout
 }
 
 // ====================== MQTT CALLBACK ========================
-static int fan = 0;
-static int light = 0;
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String msg = "";
@@ -513,14 +543,86 @@ void mqttConnect() {
     delay(3000);
   }
 }
-
-
 String str;
+void initLoRa() {
+  pinMode(RST, OUTPUT);
+
+  loraSerial.begin(57600, SERIAL_8N1, RXD2, TXD2);
+  loraSerial.setTimeout(2000);
+
+  bool moduleReady = false;
+
+  for (int attempt = 0; attempt < 5; attempt++) {
+    Serial.printf("[LoRa] Init attempt %d...\n", attempt + 1);
+
+    // Reset hardware
+    digitalWrite(RST, HIGH);
+    delay(100);
+    digitalWrite(RST, LOW);
+    delay(500);
+    digitalWrite(RST, HIGH);
+    delay(2000);
+
+    // Svuota buffer
+    while (loraSerial.available()) loraSerial.read();
+    delay(100);
+
+    // Leggi messaggio di boot
+    String boot = loraSerial.readStringUntil('\n');
+    boot.trim();
+    if (boot.length() > 0) {
+      Serial.print("[BOOT] "); Serial.println(boot);
+    }
+
+    // Prova sys get ver
+    while (loraSerial.available()) loraSerial.read();
+    loraSerial.println("sys get ver");
+    String ver = loraSerial.readStringUntil('\n');
+    ver.trim();
+    Serial.print("[VER] "); Serial.println(ver);
+
+    if (ver.startsWith("RN2483")) {
+      moduleReady = true;
+      break;
+    }
+
+    Serial.println("[LoRa] No response, retrying...");
+  }
+
+  if (!moduleReady) {
+    Serial.println("[LoRa] FAILED after 5 attempts!");
+    return;
+  }
+
+  // Modulo pronto, configura
+  loraSerial.setTimeout(1000);
+
+  loraSerial.println("mac pause");
+  Serial.println(loraSerial.readStringUntil('\n'));
+
+  loraSerial.println("radio set mod lora");      loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set freq 869100000"); loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set pwr 14");         loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set sf sf7");         loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set afcbw 41.7");     loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set rxbw 20.8");      loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set prlen 8");        loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set crc on");         loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set iqi off");        loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set cr 4/5");         loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set wdt 60000");      loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set sync 12");        loraSerial.readStringUntil('\n');
+  loraSerial.println("radio set bw 125");         loraSerial.readStringUntil('\n');
+
+  Serial.println("[LoRa] Ready");
+}
+
+/*String str;
 // ====================== LoRa INIT ============================
 void initLoRa() {
   
   digitalWrite(RST, HIGH);
-  delay(200);
+  delay(700);
   digitalWrite(RST, LOW);
   delay(700);
   digitalWrite(RST, HIGH);
@@ -596,7 +698,7 @@ void initLoRa() {
   Serial.println(str);
 
   Serial.println("LoRa ready");
-}
+}*/
 
 // ====================== SETUP / LOOP =========================
 void setup() {
@@ -627,7 +729,8 @@ void setup() {
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     mqtt.setCallback(mqttCallback);
     mqtt.setBufferSize(512);
-    mqttConnect();  // Connetti MQTT PRIMA del BLE
+    mqtt.setKeepAlive(60);   // ← aggiungi qui
+    mqttConnect();
   }
 
   // ORA inizializza BLE (dopo che TLS handshake è completato)
@@ -664,25 +767,42 @@ void loop() {
       connectToTracker();
     }
 
-    // Read RSSI every 3 seconds when connected
-    if (trackerConnected && now - lastRSSIRead > 3000) {
+    // Take a sample every 3s when connected
+    if (trackerConnected && now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
       int rssi = bleClient->getRssi();
       float dist = rssiToDistance(rssi);
-      Serial.printf("[GATEWAY] Dog RSSI: %d dBm | ~%.1f m\n", rssi, dist);
-      
-      // Pubblica su MQTT
-      int zone = 0;  // safe
-      if (rssi < RSSI_ALARM_THRESHOLD) zone = 2;       // alarm
-      else if (rssi < RSSI_WARNING_THRESHOLD) zone = 1; // warning
-      
-      String petMsg = "distance=" + String(dist, 1) + ";zone=" + String(zone);
-      mqtt.publish(TOPIC_PET_STATUS, petMsg.c_str());
-      
-      lastRSSIRead = now;
+
+      if (distCount < RSSI_SAMPLES) {
+        distBuffer[distCount++] = dist;
+      }
+      lastSampleTime = now;
+    }
+
+    // Send minimum every 30s
+    if (trackerConnected && now - lastSendTime >= SEND_INTERVAL_MS) {
+      float minDist = getMinDistance();
+      if (minDist >= 0) {
+        Serial.printf("[GATEWAY] Sending min distance: %.2f m\n", minDist);
+        
+        // Calculate zone based on minimum distance
+        // Assuming: -69 dBm @ 1m, typical thresholds:
+        // zone 0 = safe (dist < 10m)
+        // zone 1 = warning (dist 10-20m, RSSI warning threshold)
+        // zone 2 = alarm (dist > 20m, RSSI alarm threshold)
+        int zone = 0;
+        if (minDist > 20.0) zone = 2;  // alarm
+        else if (minDist > 10.0) zone = 1;  // warning
+        
+        String petMsg = "distance=" + String(minDist, 2) + ";zone=" + String(zone);
+        mqtt.publish(TOPIC_PET_STATUS, petMsg.c_str());
+      }
+      // Reset buffer for next window
+      distCount    = 0;
+      lastSendTime = now;
     }
   }
 
-  delay(15000);
+  delay(1000);
   
   if (now - lastCycleStart >= CYCLE_PERIOD) {
     lastCycleStart = now;
