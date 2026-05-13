@@ -7,37 +7,44 @@
 
 DHT dht(DHT_PIN, DHT_TYPE);
 
-static const int LIGHT_DARK_RAW   = 3500;
-static const int LIGHT_BRIGHT_RAW = 500;
-static const int LIGHT_SAMPLES    = 10;
+// Starting calibration values.
+// Adjust these after testing your real sensor.
+static const int SOIL_DRY_RAW = 3200;
+static const int SOIL_WET_RAW = 1300;
+static const int SOIL_SAMPLES = 10;
 
-static int readLightRaw() {
+static int readSoilRaw() {
     int sum = 0;
-    for (int i = 0; i < LIGHT_SAMPLES; i++) {
-        sum += analogRead(LDR_PIN);
+
+    for (int i = 0; i < SOIL_SAMPLES; i++) {
+        sum += analogRead(SOIL_PIN);
         delay(5);
     }
-    return sum / LIGHT_SAMPLES;
+
+    return sum / SOIL_SAMPLES;
 }
 
-static int convertLightToPercent(int raw) {
-    int pct = map(raw, LIGHT_DARK_RAW, LIGHT_BRIGHT_RAW, 0, 100);
+static int convertSoilToPercent(int raw) {
+    int pct = map(raw, SOIL_DRY_RAW, SOIL_WET_RAW, 0, 100);
     pct = constrain(pct, 0, 100);
     return pct;
 }
 
 void initSensors() {
     dht.begin();
+
+    analogReadResolution(12);
+    analogSetPinAttenuation(SOIL_PIN, ADC_11db);
 }
 
 SensorData readSensors() {
     SensorData data;
+
     data.temperature = dht.readTemperature();
     data.humidity    = dht.readHumidity();
-    data.water       = analogRead(WATER_PIN);
 
-    int rawLight = readLightRaw();
-    data.light   = convertLightToPercent(rawLight);
+    int soilRaw = readSoilRaw();
+    data.soilMoisture = convertSoilToPercent(soilRaw);
 
     return data;
 }

@@ -17,6 +17,7 @@
 #include "sensors.h"
 #include "radio.h"
 #include "pins.h"
+#include "protocol.h"
 
 // ── Deep sleep config ─────────────────────────────────────────
 // Gateway cycle is 10 minutes (600s)-- Wake 1min before
@@ -52,7 +53,8 @@ static String buildDataMessage(const SensorData& data) {
     String msg = String(NODE_ID) + "|DATA|" + String(GATEWAY_ID) + "|";
     msg += "temp=" + String(t, 1);
     msg += ";hum=" + String(h, 1);
-    msg += ";water=" + String(data.water);
+    msg += ";soil=" + String(data.soilMoisture);
+
     return msg;
 }
 
@@ -100,7 +102,7 @@ void setup() {
 
     // ── Step 1: Wait for SYNC from gateway ────────────────────
     Serial.println("[PLANT] Waiting for SYNC...");
-    String syncMsg = loraReceive(SYNC_TIMEOUT);
+    String syncMsg = loraReceive(SYNC_TIMEOUT_MS);
 
     if (!isSyncMessage(syncMsg)) {
         Serial.println("[ERROR] No SYNC received - going back to sleep");
@@ -111,8 +113,10 @@ void setup() {
 
     // ── Step 2: Read sensors ──────────────────────────────────
     SensorData data = readSensors();
-    Serial.printf("[SENSORS] T=%.1f H=%.1f W=%d L=%d\n",
-                  data.temperature, data.humidity, data.water, data.light);
+    Serial.printf("[SENSORS] T=%.1f H=%.1f Soil=%d%%\n",
+              data.temperature,
+              data.humidity,
+              data.soilMoisture);
 
     // ── Step 3: Send DATA immediately (plant = slot 1, no delay)
     String dataMsg = buildDataMessage(data);
