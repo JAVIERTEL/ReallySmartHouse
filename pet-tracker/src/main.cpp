@@ -20,7 +20,6 @@ static const long RN_BAUD = 57600;
 
 // =========================
 // LoRaWAN OTAA credentials
-// Integrated with Cibicom
 // =========================
 #define LORAWAN_DEV_EUI  "0004A30B01060D5E"
 #define LORAWAN_APP_EUI  "BE7A000000001465"
@@ -29,20 +28,34 @@ static const long RN_BAUD = 57600;
 // =========================
 // Timeouts
 // =========================
-static const unsigned long GRACE_TIMEOUT_MS  = 15000;
-static const unsigned long LORAWAN_INTERVAL  = 60000;
-static const unsigned long JOIN_RETRY_MS     = 30000;  // wait before retrying join
+static const unsigned long GRACE_TIMEOUT_MS    = 15000;
+static const unsigned long LORAWAN_INTERVAL    = 60000;
+static const unsigned long JOIN_RETRY_MS       = 30000;
+static const unsigned long BLE_CONNECT_WAIT_MS =  5000; // ← espera al gateway al arrancar fase ON
+
+// =========================
+// BLE cycle timing
+// =========================
+static const unsigned long BLE_OFF_DURATION = 120000;
+static const unsigned long BLE_ON_DURATION  =  40000;
 
 // =========================
 // System state
 // =========================
-enum TrackerState { BLE_ACTIVE, GRACE_PERIOD, LORAWAN_BACKUP };
-TrackerState state = BLE_ACTIVE;
+enum TrackerState { BLE_CONNECTING, BLE_ACTIVE, GRACE_PERIOD, LORAWAN_BACKUP };
+TrackerState state = BLE_CONNECTING;
 
-unsigned long gracePeriodStart = 0;
-unsigned long lastLoRaSend     = 0;
-unsigned long lastJoinAttempt  = 0;   // ← NEW: prevents join spam
+unsigned long gracePeriodStart   = 0;
+unsigned long lastLoRaSend       = 0;
+unsigned long lastJoinAttempt    = 0;
+unsigned long bleConnectWaitStart = 0;
 bool loraJoined = false;
+
+// =========================
+// BLE cycle state
+// =========================
+unsigned long blePhaseStart = 0;
+bool blePhaseOn = false;
 
 BLEServer*      pServer      = nullptr;
 BLEAdvertising* pAdvertising = nullptr;
@@ -61,9 +74,34 @@ class MyServerCallbacks : public BLEServerCallbacks {
   void onDisconnect(BLEServer* pServer) override {
     gatewayConnected = false;
     Serial.println("[BLE] Gateway disconnected!");
-    BLEDevice::startAdvertising();
+    if (blePhaseOn) BLEDevice::startAdvertising();
   }
 };
+
+// =========================
+// BLE ON / OFF
+// =========================
+void stopBLE() {
+  if (pServer->getConnectedCount() > 0) {
+    pServer->disconnect(0);
+    delay(200);
+  }
+  BLEDevice::stopAdvertising();
+  gatewayConnected = false;
+  blePhaseOn = false;
+  blePhaseStart = millis();
+  state = BLE_CONNECTING; // reset siempre al apagar
+  Serial.println("[BLE] OFF — sleeping 2 min");
+}
+
+void startBLE() {
+  BLEDevice::startAdvertising();
+  blePhaseOn = true;
+  blePhaseStart = millis();
+  bleConnectWaitStart = millis(); // ← iniciar ventana de espera
+  state = BLE_CONNECTING;        // ← esperar conexión antes de evaluar
+  Serial.println("[BLE] ON — active 40s, waiting for gateway...");
+}
 
 // =========================
 // RN2483 helpers
@@ -74,13 +112,11 @@ String readRnLine(uint32_t timeoutMs = 2000) {
   while (millis() - start < timeoutMs) {
     while (loraSerial.available()) {
       char c = (char)loraSerial.read();
-      Serial.print(c);  // Debug: print every byte received
       if (c == '\r') continue;
       if (c == '\n') { if (s.length() > 0) return s; }
       else s += c;
     }
   }
-  if (s.length() > 0) return s;  // Return partial data even if no newline
   return s;
 }
 
@@ -99,57 +135,43 @@ void setupBLE() {
   BLEDevice::init(PET_TRACKER_NAME);
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
-
   BLEService* pService = pServer->createService(PET_TRACKER_UUID);
   pService->start();
-
   pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(PET_TRACKER_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);
-  pAdvertising->setMinInterval(160);
-  pAdvertising->setMaxInterval(240);
-  BLEDevice::startAdvertising();
-
-  Serial.println("[BLE] Broadcasting as " + String(PET_TRACKER_NAME));
+  pAdvertising->setMinInterval(400);
+  pAdvertising->setMaxInterval(800);
+  Serial.println("[BLE] Initialized as " + String(PET_TRACKER_NAME));
 }
 
 // =========================
 // LoRaWAN init (OTAA)
 // =========================
 bool initLoRaWAN() {
-  lastJoinAttempt = millis();  // record attempt time
-
+  lastJoinAttempt = millis();
   pinMode(RN2483_RST, OUTPUT);
   digitalWrite(RN2483_RST, LOW);  delay(200);
   digitalWrite(RN2483_RST, HIGH); delay(1000);
-  readRnLine(1500);  // consume boot banner
-
-  // Debug: Verificar que el módulo responde
-  Serial.println("[DEBUG] Testing RN2483 communication...");
+  readRnLine(1500);
   rnCommand("sys get ver", nullptr);
   rnCommand("mac get dr", "ok");
   rnCommand("mac get adr", "ok");
   delay(500);
-  Serial.println("[DEBUG] RN2483 communication OK");
-
   loraSerial.println("mac get deveui");
   String hwEUI = readRnLine(1000);
   Serial.println("[RN] Module DevEUI: " + hwEUI);
-
   rnCommand("mac set deveui " LORAWAN_DEV_EUI, "ok");
   rnCommand("mac set appeui " LORAWAN_APP_EUI, "ok");
   rnCommand("mac set appkey " LORAWAN_APP_KEY, "ok");
   rnCommand("mac set adr on", "ok");
   rnCommand("mac set dr 5",   "ok");
-
   loraSerial.println("mac join otaa");
   Serial.println("[LoRa] Joining LoRaWAN...");
-
   String r1 = readRnLine(5000);
   String r2 = readRnLine(15000);
   Serial.println("[LoRa] Join R1: " + r1 + "  R2: " + r2);
-
   if (r1.indexOf("accepted") >= 0 || r2.indexOf("accepted") >= 0) {
     Serial.println("[LoRa] Joined successfully!");
     return true;
@@ -164,9 +186,7 @@ bool initLoRaWAN() {
 String asciiToHex(const String& s) {
   String out = "";
   for (size_t i = 0; i < s.length(); i++) {
-    char buf[3];
-    sprintf(buf, "%02X", (uint8_t)s[i]);
-    out += buf;
+    char buf[3]; sprintf(buf, "%02X", (uint8_t)s[i]); out += buf;
   }
   return out;
 }
@@ -186,13 +206,11 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("=== Pet Tracker booting... ===");
-
   loraSerial.begin(RN_BAUD, SERIAL_8N1, RN2483_RX, RN2483_TX);
   loraSerial.setTimeout(1000);
-
   setupBLE();
-
-  Serial.println("[LoRa] Standby — waiting for BLE loss");
+  stopBLE(); // arranca con BLE apagado
+  Serial.println("[LoRa] Standby — waiting for BLE cycle");
   lastLoRaSend = millis();
 }
 
@@ -200,13 +218,37 @@ void setup() {
 // Loop — state machine
 // =========================
 void loop() {
-  unsigned long now   = millis();
-  bool          bleOK = gatewayConnected;
+  unsigned long now = millis();
 
+  // --- Ciclo BLE ON/OFF ---
+  if (!blePhaseOn && now - blePhaseStart >= BLE_OFF_DURATION) {
+    startBLE();
+  } else if (blePhaseOn && now - blePhaseStart >= BLE_ON_DURATION) {
+    Serial.println("[BLE] 40s window over — turning off");
+    stopBLE(); // ya hace state = BLE_CONNECTING
+  }
+
+  bool bleOK = gatewayConnected && blePhaseOn;
+
+  // --- State machine ---
   switch (state) {
 
+    case BLE_CONNECTING:
+      // Ventana de espera: dar tiempo al gateway para conectar
+      if (bleOK) {
+        state = BLE_ACTIVE;
+        Serial.println("[STATE] Gateway connected -> BLE_ACTIVE");
+      } else if (blePhaseOn && now - bleConnectWaitStart > BLE_CONNECT_WAIT_MS) {
+        // Pasaron 5s sin conexión → iniciar grace
+        gracePeriodStart = now;
+        state = GRACE_PERIOD;
+        Serial.println("[STATE] No connection after wait -> GRACE_PERIOD");
+      }
+      // si !blePhaseOn → fase OFF, no hacer nada
+      break;
+
     case BLE_ACTIVE:
-      if (!bleOK) {
+      if (!bleOK && blePhaseOn) {
         gracePeriodStart = now;
         state = GRACE_PERIOD;
         Serial.println("[STATE] BLE lost -> GRACE_PERIOD");
@@ -217,8 +259,10 @@ void loop() {
       if (bleOK) {
         state = BLE_ACTIVE;
         Serial.println("[STATE] BLE recovered -> BLE_ACTIVE");
+      } else if (!blePhaseOn) {
+        state = BLE_CONNECTING;
+        Serial.println("[STATE] BLE phase OFF — cancelling grace");
       } else if (now - gracePeriodStart > GRACE_TIMEOUT_MS) {
-        // Only attempt join if not already joined AND retry window has passed
         if (!loraJoined && (now - lastJoinAttempt > JOIN_RETRY_MS)) {
           Serial.println("[STATE] Grace timeout -> activating LoRaWAN backup");
           loraJoined = initLoRaWAN();
@@ -236,6 +280,8 @@ void loop() {
         if (loraJoined) sendLoRaWAN("PET_RETURNED");
         state = BLE_ACTIVE;
         Serial.println("[STATE] Back in BLE range -> BLE_ACTIVE");
+      } else if (!blePhaseOn) {
+        // fase OFF — pausar, no mandar nada
       } else if (now - lastLoRaSend > LORAWAN_INTERVAL) {
         sendLoRaWAN("PET_MISSING");
         lastLoRaSend = now;
