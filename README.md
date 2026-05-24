@@ -12,7 +12,6 @@ Each folder is an independent PlatformIO project with its own `platformio.ini`.
 |---|---|---|
 | `gateway` | Central coordinator: receives LoRa packets from all nodes, tracks the pet collar over BLE, and forwards everything to HiveMQ via MQTT over Wi-Fi. | ESP32, LoRa P2P, BLE, Wi-Fi, MQTT |
 | `pet-tracker` | Wearable collar node. Advertises over BLE while near the gateway. Falls back to LoRaWAN via Cibicom when BLE is unavailable. | ESP32, BLE, RN2483, LoRaWAN |
-| `aquarium` | Aquarium monitoring and automatic feeder node. | ESP32, LoRa |
 | `plant-node` | Monitors temperature, humidity, and soil moisture. Controls a grow light. Uses deep sleep between cycles. | ESP32, LoRa, DHT |
 | `air-node` | Room climate monitoring with fan and servo actuator. | ESP32, LoRa, DHT, servo |
 | `mailbox` | Event-driven node that wakes on mail delivery, checks battery level, and sends an alert. | ESP32, LoRa, ADC |
