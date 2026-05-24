@@ -1,4 +1,7 @@
 #pragma once
+#include <Arduino.h>
+#include <stdint.h>
+
 #define LORA_FREQUENCY     868E6
 #define LORA_BANDWIDTH     125E3
 #define LORA_SF            7
@@ -6,7 +9,6 @@
 
 #define NODE_GATEWAY       0x00
 #define NODE_PET_TRACKER   0x01
-#define NODE_AQUARIUM      0x02
 #define NODE_PLANT         0x03
 #define NODE_AIR           0x04
 #define NODE_MAILBOX       0x05
