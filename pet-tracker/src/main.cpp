@@ -31,7 +31,7 @@ static const long RN_BAUD = 57600;
 static const unsigned long GRACE_TIMEOUT_MS    = 15000;
 static const unsigned long LORAWAN_INTERVAL    = 60000;
 static const unsigned long JOIN_RETRY_MS       = 30000;
-static const unsigned long BLE_CONNECT_WAIT_MS =  5000; // ← espera al gateway al arrancar fase ON
+static const unsigned long BLE_CONNECT_WAIT_MS =  5000; 
 
 // =========================
 // BLE cycle timing
@@ -90,7 +90,7 @@ void stopBLE() {
   gatewayConnected = false;
   blePhaseOn = false;
   blePhaseStart = millis();
-  state = BLE_CONNECTING; // reset siempre al apagar
+  state = BLE_CONNECTING;
   Serial.println("[BLE] OFF — sleeping 2 min");
 }
 
@@ -98,8 +98,8 @@ void startBLE() {
   BLEDevice::startAdvertising();
   blePhaseOn = true;
   blePhaseStart = millis();
-  bleConnectWaitStart = millis(); // ← iniciar ventana de espera
-  state = BLE_CONNECTING;        // ← esperar conexión antes de evaluar
+  bleConnectWaitStart = millis(); 
+  state = BLE_CONNECTING;        
   Serial.println("[BLE] ON — active 40s, waiting for gateway...");
 }
 
@@ -209,7 +209,7 @@ void setup() {
   loraSerial.begin(RN_BAUD, SERIAL_8N1, RN2483_RX, RN2483_TX);
   loraSerial.setTimeout(1000);
   setupBLE();
-  stopBLE(); // arranca con BLE apagado
+  stopBLE(); 
   Serial.println("[LoRa] Standby — waiting for BLE cycle");
   lastLoRaSend = millis();
 }
@@ -220,7 +220,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // --- Ciclo BLE ON/OFF ---
+  // --- Cicle BLE ON/OFF ---
   if (!blePhaseOn && now - blePhaseStart >= BLE_OFF_DURATION) {
     startBLE();
   } else if (blePhaseOn && now - blePhaseStart >= BLE_ON_DURATION) {
@@ -234,7 +234,6 @@ void loop() {
   switch (state) {
 
     case BLE_CONNECTING:
-      // Ventana de espera: dar tiempo al gateway para conectar
       if (bleOK) {
         state = BLE_ACTIVE;
         Serial.println("[STATE] Gateway connected -> BLE_ACTIVE");
@@ -244,7 +243,7 @@ void loop() {
         state = GRACE_PERIOD;
         Serial.println("[STATE] No connection after wait -> GRACE_PERIOD");
       }
-      // si !blePhaseOn → fase OFF, no hacer nada
+     
       break;
 
     case BLE_ACTIVE:
