@@ -6,34 +6,29 @@
 #define DHTTYPE     DHT11
 
 // ── HW-482 Latching Relay ─────────────────────────────────────
-// Single coil latching relay — one pin, toggles on each pulse
-// State is held mechanically — survives deep sleep
 #define RELAY_PIN   5    // GPIO5 — relay toggle pin
 
-// ── RN2483 — Hardware Serial 2 ────────────────────────────────
+// ── RN2483 ────────────────────────────────────────────────────
 #define RN_RX       13   // GPIO13 — ESP32 RX2 <- RN2483 TX
 #define RN_TX       14   // GPIO14 — ESP32 TX2 -> RN2483 RX
 #define RN_RST      27   // GPIO27
 #define RN_BAUD     57600
 
 // ── Battery ───────────────────────────────────────────────────
-#define BATTERY_PIN 34   // GPIO34 — input only, safe for ADC
+#define BATTERY_PIN 34   // GPIO34 — input only, for future implementation
 
 // ── Protocol constants ────────────────────────────────────────
 #define NODE_ADDR     "02"
 #define GATEWAY_ADDR  "00"
 #define TIMEOUT_ACK   1500    // ms to wait for ACK from gateway
-#define TIMEOUT_SYNC  120000  // ms to wait for SYNC after wake-up (2 minutes)
+#define TIMEOUT_SYNC  60000   // ms to wait for SYNC after wake-up (1 minute)
 #define TIMEOUT_CMD   3000    // ms to wait for CMD after ACK
 #define SLEEP_MINUTES 10      // minutes to sleep between cycles
 
 // ── Deep sleep ────────────────────────────────────────────────
-// ESP32 uses RTC timer — no extra wire needed
 #define SLEEP_US  (SLEEP_MINUTES * 60 * 1000000ULL)
 
-// ── Fan state — survives deep sleep via RTC memory ────────────
-// RTC_DATA_ATTR persists across deep sleep cycles
-// This prevents toggling the relay unnecessarily if state hasn't changed
+// ── Fan state ─────────────────────────────────────────────────
 RTC_DATA_ATTR bool fanState = false;
 
 DHT dht(DHTPIN, DHTTYPE);
@@ -67,7 +62,7 @@ void setFan(bool on) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// LoRa P2P init — settings agreed with gateway team
+// LoRa P2P init
 // ─────────────────────────────────────────────────────────────
 
 void initLoRa() {
@@ -91,7 +86,6 @@ void initLoRa() {
   str = loraSerial.readStringUntil('\n');
   Serial.println(str);
 
-  // Pause LoRaWAN stack — required before P2P radio commands
   loraSerial.println("mac pause");
   str = loraSerial.readStringUntil('\n');
   Serial.println(str);
@@ -206,7 +200,7 @@ String loraReceive(int timeout) {
       }
     }
   }
-  return "";  // timeout
+  return "";
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -214,7 +208,8 @@ String loraReceive(int timeout) {
 // ─────────────────────────────────────────────────────────────
 
 String buildDataMessage(float temp, float hum, float battery) {
-  // Format: 02|DATA|00|temp=XX.X;hum=XX.X;bat=XX
+  // Format: 02|DATA|00|temp=XX.X;hum=XX.X
+  // Battery for future implementation only
   return NODE_ADDR "|DATA|" GATEWAY_ADDR "|temp=" +
          String(temp, 1) + ";hum=" + String(hum, 1) +
          ";bat=" + String(battery, 0);
@@ -246,7 +241,7 @@ String extractCmdValue(String msg) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Battery
+// Battery -> For future improvements
 // ─────────────────────────────────────────────────────────────
 
 float readBatteryPercent() {
@@ -265,13 +260,12 @@ void goToSleep() {
   Serial.flush();
   gpio_hold_en((gpio_num_t)RELAY_PIN);  // Hold relay pin state during deep sleep
   gpio_deep_sleep_hold_en();
-  // No servo to detach — relay holds state on its own
   esp_sleep_enable_timer_wakeup(SLEEP_US);
   esp_deep_sleep_start();
 }
 
 // ─────────────────────────────────────────────────────────────
-// Setup — runs once per wake cycle
+// Setup
 // ─────────────────────────────────────────────────────────────
 
 void setup() {
@@ -298,7 +292,7 @@ void setup() {
   // ── Step 2: read sensors ─────────────────────────────────────
   float humidity    = dht.readHumidity();
   float temperature = dht.readTemperature();
-  float battery     = readBatteryPercent();
+  float battery     = readBatteryPercent(); // For future implementation
 
   if (isnan(humidity) || isnan(temperature)) {
     Serial.println("[ERROR] DHT11 read failed - going back to sleep");
@@ -308,10 +302,10 @@ void setup() {
 
   Serial.print("Temp= "); Serial.print(temperature); Serial.println(" C");
   Serial.print("Hum=  "); Serial.print(humidity);    Serial.println(" %");
-  Serial.print("Bat=  "); Serial.print(battery);     Serial.println(" %");
+  Serial.print("Bat=  "); Serial.print(battery);     Serial.println(" %"); // For future implementation
 
   // ── Automatic climate control ─────────────────────────────────
-  bool autoFanOn = (temperature > 78.0 || humidity > 90.0);
+  bool autoFanOn = (temperature > 78.0 || humidity > 90.0); // Arbitrary numbers for testing
   setFan(autoFanOn);
    
   // ── Step 3: send DATA, wait for ACK, resend once if needed ──
@@ -353,5 +347,4 @@ void setup() {
 }
 
 void loop() {
-  // Intentionally empty — deep sleep resets into setup()
 }
